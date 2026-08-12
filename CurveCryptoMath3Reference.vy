@@ -156,14 +156,35 @@ def get_y(
         d = d / additional_prec / divider
 
     # 【2. 阶段 1.2 与阶段 2 映射：契尔恩豪斯变换与二次预解式】
-    # 为了消灭 y^2 项并降维，代码计算了 delta0 和 delta1。
-    # 它们在数学上对应于卡尔丹公式的中间变量（即缺项三次方程 t^3 + pt + q = 0 中的 p 和 q 的变形组合）
+    """
+        把 p 的子项除以 b:
+            △₀ = (3ac - b^2) / b
+
+        把 q 的子项除以 -b^²:
+            △₁ = (2b^³ - 9abc + 27a^²d) / -b^²
+
+        就得出来了下面的 delta0 和 delta1, 它们是卡尔丹公式的核心判别式 Δ 的前置计算。
+    """
     delta0: int256 = 3*a*c/b - b
     delta1: int256 = 9*a*c/b - 2*b - 27*a**2/b*d/b
 
     # 【3. 阶段 3 核心映射：提取判别式 Δ】
     # sqrt_arg 就是我们推导出的判别式核心 Δ = (q/2)^2 + (p/3)^3 经过代码缩放处理后的结果。
-    # 这个变量掌握着整个智能合约的生死！
+
+    """
+        p = (3ac - b^²) / (3a^²)
+        q = (2b^³ - 9abc + 27a^²d) / (27a^³)
+
+
+        结合上面  △₀ 和 △₁ 的定义：
+            p = b • △₀ / (3a^²)
+            q = -b^² • △₁ / (27a^³)
+
+        带入判别式化简：
+            △ = b⁴/2916a⁶ • (△₁² + 4△₀³/b)
+
+        就是下面的 sqrt_arg 计算。
+    """
     sqrt_arg: int256 = delta1**2 + 4*delta0**2/b*delta0
     sqrt_val: int256 = 0
     # 【4. 高阶安全审计视角：不可约情形 (Casus Irreducibilis) 与 EVM 的死穴】
@@ -181,7 +202,11 @@ def get_y(
         return [self._newton_y(_ANN, _gamma, x, _D, i), 0]
 
     # 【5. 阶段 2.3 与阶段 3 映射：求解卡尔丹公式的立方根 u 和 v】
-    # 只要代码没进入 else 分支，就说明是单实数根的坦途，我们继续算出卡尔丹公式。
+    """
+        求 ∛b :
+        如果 b 是正数，直接开方；如果 b 是负数，就先取它的绝对值 (-b),
+        当作正数交给 _cbrt 算出结果，最后再在外面手动套上一个负号
+    """
     b_cbrt: int256 = 0
     if b >= 0:
         b_cbrt = convert(self._cbrt(convert(b, uint256)), int256)
@@ -190,16 +215,71 @@ def get_y(
 
     second_cbrt: int256 = 0
     # 这一步计算的就是卡尔丹公式里核心的开立方根结构：u = ∛(-q/2 + √Δ)
+    """
+        负负得正, 抵掉了负号:
+            -q/2 = (b^²• △₁)/54a³ 
+
+        sqrt_val = √sqrt_arg
+
+        △ = b⁴/2916a⁶ • (sqrt_val)²
+
+        卡尔丹公式需要用到的是 √△ :
+            √△ = b²/54a³ • sqrt_val
+
+        u   = ∛(-q/2 + √△) 
+            = ∛(△₁ • b²/54a³ + b²/54a³ • sqrt_val) 
+
+        把公因数提到外部:
+            ∛(b²/54a³ • (△₁ + sqrt_val))
+
+        下面计算的就是 (△₁ + sqrt_val)
+
+        我们需要对 u³  开立方， 54 的一半 27 可以开立方， 所以：
+            u = ∛(b²/27a³ • (△₁ + sqrt_val)/2)
+
+        对等式两边分别开立方：
+            ∛(b²/27a³) = b^(⅔)/3a
+        b 在前面已经开立方了， 所以 b_cbrt*b_cbrt 就是 b^(⅔)。
+
+        右边那一半无法化简，只能交给 EVM 去硬算, 完美对应 second_cbrt 的代码实现.
+    """
     if delta1 > 0:
         second_cbrt = convert(self._cbrt(convert((delta1 + sqrt_val), uint256)/2), int256)
     else:
+        # 负数处理方式
         second_cbrt = -convert(self._cbrt(convert(-(delta1 - sqrt_val), uint256)/2), int256)
 
     # 【6. 回归原点：撤销韦达替换 (t = u+v) 与契尔恩豪斯平移 (x = t - B/3)】
-    # C1 和 root_K0 的计算是将 u 和 v 组合在一起完成 t = u + v 的动作。
+    """
+        计算出 u :
+            b^(⅔) • (△₁ + sqrt_val)/2
+
+        这里算出的就是 3a • u
+
+        这里的 b_cbrt 和 second_cbrt 都是经过了缩放处理的， 需要除以 10^18 来还原回原来的数值。
+    """
     C1: int256 = b_cbrt*b_cbrt/10**18*second_cbrt/10**18
 
     # 这一步对应了平移的逆向操作，把 t 还原回 x（x = t - B/3）。
+    """
+        利用了韦达定理的一个隐藏属性: u•v = -p/3
+        根据  p = b • △₀ / (3a^²) , 同乘 3a 来匹配 C1 的放大倍数:
+            3a • v = 3a • (-p/3)/3u 
+
+        化简得:
+            -(b• △₀ / 3a • u) = -(b• △₀ / C1)
+
+        所以:
+            3a • u = C1
+            3a • v = -(b• △₀ / C1)
+            3a • t = 3a • u + 3a • v = C1 - b• △₀ / C1
+            
+        一开始为了消去 y^2 项所做的变换:
+            y = t - b/3a
+
+        将公式两边同乘 3a:
+            3a • y = 3a • t - b = C1 - b• △₀ / C1 - b
+    """
     root_K0: int256 = (b + b*delta0/C1 - C1)/3
 
     # 最终结合代币精度和 AMM 的 D 值进行换算，得出真正可以用于转账的精确余额！
