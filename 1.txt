@@ -1,1 +1,0 @@
-https://shivank011.medium.com/formal-threat-modeling-for-smart-contracts-beyond-reentrancy-584f6670f809
